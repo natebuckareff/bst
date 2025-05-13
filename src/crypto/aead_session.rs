@@ -18,6 +18,7 @@ pub struct AeadSession {
     aead_cipher: ChaCha20Poly1305,
     is_receiver: bool,
     counter: u64,
+    finished: bool,
 }
 
 impl AeadSession {
@@ -32,6 +33,7 @@ impl AeadSession {
             aead_cipher,
             is_receiver,
             counter: 0,
+            finished: false,
         })
     }
 
@@ -120,22 +122,34 @@ impl AeadSession {
         Ok(())
     }
 
-    fn update(&mut self) -> Result<()> {
+    fn update(&mut self, is_finished: bool) -> Result<bool> {
         if self.counter < COUNTER_ROLLOVER {
             self.counter += 1;
-            Ok(())
         } else {
-            self.rekey()
+            self.rekey()?;
         }
+        if is_finished {
+            self.finished = true;
+        }
+        Ok(is_finished)
     }
 
-    pub fn encrypt(&mut self, frame: &mut BytesMut) -> Result<()> {
-        let counter_bytes = self.counter.to_be_bytes();
+    fn get_nonce(&self, counter_bytes: &[u8]) -> chacha20poly1305::Nonce {
         let mut nonce = *self.static_iv;
         for (n, c) in nonce[NONCE_LEN - 8..].iter_mut().zip(counter_bytes) {
             *n ^= c;
         }
-        let nonce = chacha20poly1305::Nonce::from(nonce);
+        chacha20poly1305::Nonce::from(nonce)
+    }
+
+    pub fn encrypt(&mut self, frame: &mut BytesMut) -> Result<bool> {
+        if self.finished {
+            return Err(anyhow!("session finished"));
+        }
+
+        let is_finished = frame.len() == 0;
+        let counter_bytes = self.counter.to_be_bytes();
+        let nonce = self.get_nonce(&counter_bytes);
 
         frame.reserve(TAG_LEN);
 
@@ -148,22 +162,22 @@ impl AeadSession {
         header.unsplit(frame.split());
         *frame = header;
 
-        self.update()
+        self.update(is_finished)
     }
 
-    pub fn decrypt(&mut self, frame: &mut BytesMut) -> Result<()> {
-        let counter_bytes = frame.split_to(8);
-        let mut nonce = *self.static_iv;
-        for (n, c) in nonce[NONCE_LEN - 8..].iter_mut().zip(&counter_bytes) {
-            *n ^= c;
+    pub fn decrypt(&mut self, frame: &mut BytesMut) -> Result<bool> {
+        if self.finished {
+            return Err(anyhow!("session finished"));
         }
-        let nonce = chacha20poly1305::Nonce::from(nonce);
+
+        let counter_bytes = frame.split_to(8);
+        let nonce = self.get_nonce(&counter_bytes);
 
         self.aead_cipher
             .decrypt_in_place(&nonce, &counter_bytes[..], frame)
             .context("aead decryption failed")?;
 
-        self.update()
+        self.update(frame.len() == 0)
     }
 }
 
@@ -173,19 +187,51 @@ fn test_encryts_and_decrypts() {
     use x25519_dalek::{EphemeralSecret, PublicKey};
 
     let alice_secret = EphemeralSecret::random_from_rng(OsRng);
+    let alice_public = PublicKey::from(&alice_secret);
     let bob_secret = EphemeralSecret::random_from_rng(OsRng);
     let bob_public = PublicKey::from(&bob_secret);
-    let shared_secret = alice_secret.diffie_hellman(&bob_public);
 
-    let mut session = AeadSession::new(&shared_secret, true).unwrap();
+    let alice_shared_secret = alice_secret.diffie_hellman(&bob_public);
+    let mut alice = AeadSession::new(&alice_shared_secret, true).unwrap();
 
-    let message = b"Hello, world!";
+    let bob_shared_secret = bob_secret.diffie_hellman(&alice_public);
+    let mut bob = AeadSession::new(&bob_shared_secret, true).unwrap();
+
+    // Simulated network packet
     let mut frame = BytesMut::new();
-    frame.extend_from_slice(message);
-    session.encrypt(&mut frame).unwrap();
-    let mut frame = frame;
-    assert_ne!(&message[..], frame, "is encrypted");
 
-    session.decrypt(&mut frame).unwrap();
-    assert_eq!(&message[..], frame, "is decrypted");
+    // Send first frame
+    let message = b"Hello Bob!";
+    frame.extend_from_slice(b"Hello Bob!");
+    assert_eq!(alice.encrypt(&mut frame).unwrap(), false);
+    assert_ne!(&message[..], frame);
+
+    // Receive first frame
+    assert_eq!(bob.decrypt(&mut frame).unwrap(), false);
+    assert_eq!(&frame[..], b"Hello Bob!");
+
+    // Send reply
+    let message = b"Hi Alice!";
+    frame.clear();
+    frame.extend_from_slice(message);
+    assert_eq!(bob.encrypt(&mut frame).unwrap(), false);
+    assert_ne!(&frame[..], message);
+
+    // Receive reply
+    assert_eq!(alice.decrypt(&mut frame).unwrap(), false);
+    assert_eq!(&frame[..], b"Hi Alice!");
+    dbg!(&frame);
+
+    // Send end-of-session
+    frame.clear();
+    assert_eq!(alice.encrypt(&mut frame).unwrap(), true);
+    assert_eq!(frame.len(), 8 + 0 + TAG_LEN);
+
+    // Receive end-of-session
+    assert_eq!(bob.decrypt(&mut frame).unwrap(), true);
+    assert_eq!(frame.len(), 0);
+
+    // Try send reply past end
+    frame.extend_from_slice(b"late message");
+    assert_eq!(bob.encrypt(&mut frame).is_err(), true);
 }
