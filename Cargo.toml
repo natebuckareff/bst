@@ -4,16 +4,20 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+aead = { version = "0.5", features = ["bytes", "std"] }
 anyhow = "1"
-base-62 = "0.1.1"
-chacha20poly1305 = { version = "0.10" }
+base-62 = "0.1"
+bytes = "1"
+chacha20poly1305 = "0.10"
 clap = { version = "4", features = ["derive"] }
 directories = "6"
-ed25519-dalek = "2.1.1"
+ed25519-dalek = "2"
+hkdf = "0.12"
 humanize-duration = "0.0.7"
 rand_core = { version = "0.9", features = ["os_rng"] }
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 toml = "0.8"
 url = { version = "2", features = ["serde"] }
 x25519-dalek = "2"
-zeroize = "1.8.1"
+zeroize = "1"

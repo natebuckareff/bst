@@ -25,7 +25,7 @@ impl IdentitySecretKey {
         Ok(Self::from_bytes(bytes))
     }
 
-    pub fn from_bytes(mut secret_key: [u8; SECRET_KEY_LENGTH]) -> Self {
+    pub fn from_bytes(secret_key: [u8; SECRET_KEY_LENGTH]) -> Self {
         let key = ed25519_dalek::SigningKey::from_bytes(&secret_key);
         // secret_key.zeroize();
         Self { key }
